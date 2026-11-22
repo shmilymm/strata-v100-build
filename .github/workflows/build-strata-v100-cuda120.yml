@@ -23,6 +23,37 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
+      - name: Patch sm_90+ cudaLaunchKernelEx guards for CUDA 12.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # These 3 helpers are sm_90+ (Hopper/Blackwell) only and fall back cleanly on V100 (sm_70).
+          # Guard them with CUDART_VERSION >= 12010 since cudaLaunchKernelEx C++ template requires CUDA 12.1+.
+          $pdl = "Strata\engine\include\strata\kernels\pdl.hpp"
+          $t = [System.IO.File]::ReadAllText($pdl)
+          $old = "inline void launch_pdl(void (*kernel)(KArgs...), dim3 grid, dim3 block, size_t smem, cudaStream_t stream,`n                       Args&&... args) {`n#if !defined(__HIPCC__)"
+          $new = "inline void launch_pdl(void (*kernel)(KArgs...), dim3 grid, dim3 block, size_t smem, cudaStream_t stream,`n                       Args&&... args) {`n#if !defined(__HIPCC__) && defined(CUDART_VERSION) && (CUDART_VERSION >= 12010)"
+          $tNorm = $t -replace "`r`n", "`n"
+          if (-not $tNorm.Contains($old)) { throw "pdl.hpp pattern not found" }
+          [System.IO.File]::WriteAllText($pdl, $tNorm.Replace($old, $new))
+
+          $sampler = "Strata\engine\src\kernels\cuda\sampler.cu"
+          $t = ([System.IO.File]::ReadAllText($sampler)) -replace "`r`n", "`n"
+          $old = "bool sample_greedy_cluster(const float* logits, int n_tokens, int n_vocab, int* out, void* stream) {`n#if defined(__HIPCC__)"
+          $new = "bool sample_greedy_cluster(const float* logits, int n_tokens, int n_vocab, int* out, void* stream) {`n#if defined(__HIPCC__) || !defined(CUDART_VERSION) || (CUDART_VERSION < 12010)"
+          if (-not $t.Contains($old)) { throw "sampler.cu pattern not found" }
+          [System.IO.File]::WriteAllText($sampler, $t.Replace($old, $new))
+
+          $qsa = "Strata\engine\src\kernels\cuda\qsa_select.cu"
+          $t = ([System.IO.File]::ReadAllText($qsa)) -replace "`r`n", "`n"
+          $old = "bool qsa_block_topk_cluster(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,`n                            const QsaShapes& s, int32_t* ids, void* stream) {`n#if defined(__HIPCC__)"
+          $new = "bool qsa_block_topk_cluster(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,`n                            const QsaShapes& s, int32_t* ids, void* stream) {`n#if defined(__HIPCC__) || !defined(CUDART_VERSION) || (CUDART_VERSION < 12010)"
+          if (-not $t.Contains($old)) { throw "qsa_select.cu pattern not found" }
+          [System.IO.File]::WriteAllText($qsa, $t.Replace($old, $new))
+
+          Write-Host "Successfully patched pdl.hpp, sampler.cu, and qsa_select.cu for CUDA 12.0."
+
       - name: Install CUDA Toolkit 12.0.1 (NVIDIA Official Redist)
         shell: pwsh
         run: |
